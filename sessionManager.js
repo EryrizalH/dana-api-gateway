@@ -16,6 +16,7 @@ const SESSION_FILE = path.join(__dirname, '.DANA_SESI_JANGAN_DIHAPUS.json');
 const DEFAULT_API_BASE = process.env.DANA_API_BASE || 'https://api.saas.dana.id';
 const REFRESH_PATH = process.env.DANA_REFRESH_PATH || '/v1/oauth/token/refresh';
 const TOKEN_EXPIRY_SKEW_MS = 5 * 60 * 1000; // refresh 5 menit sebelum exp
+const REFRESH_FAIL_BACKOFF_MS = 5 * 60 * 1000; // jeda setelah refresh ditolak upstream
 
 const DEFAULT_UA =
     'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
@@ -38,7 +39,10 @@ function saveSession(session) {
         ...session,
         updated_at: new Date().toISOString()
     };
-    fs.writeFileSync(SESSION_FILE, JSON.stringify(payload, null, 2), 'utf-8');
+    // Tulis atomik: proses yang berhenti di tengah tulis tidak meninggalkan JSON rusak.
+    const tmpFile = `${SESSION_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(payload, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, SESSION_FILE);
     return payload;
 }
 
@@ -47,6 +51,12 @@ function isExpired(session) {
     if (!session.expires_at) return false; // unknown → treat as still valid, let 401 handle
     const exp = new Date(session.expires_at).getTime();
     return Date.now() >= exp - TOKEN_EXPIRY_SKEW_MS;
+}
+
+// Cegah refresh beruntun saat upstream menolak: tunggu backoff sebelum mencoba lagi.
+function isRefreshBackedOff(session) {
+    if (!session || !session.refresh_backoff_until) return false;
+    return Date.now() < new Date(session.refresh_backoff_until).getTime();
 }
 
 function buildHeaders(session, userAgent) {
@@ -81,11 +91,21 @@ async function getValidHeaders(userAgent) {
     let session = loadSession();
     if (!session) return null;
 
-    if (isExpired(session) && session.refresh_token) {
+    if (isExpired(session) && session.refresh_token && !isRefreshBackedOff(session)) {
         try {
             session = await refreshSession();
         } catch (err) {
             console.error('[DANA-SESSION] Auto-refresh gagal:', err.message);
+            try {
+                session = saveSession({
+                    ...session,
+                    refresh_backoff_until: new Date(
+                        Date.now() + REFRESH_FAIL_BACKOFF_MS
+                    ).toISOString()
+                });
+            } catch (saveErr) {
+                console.error('[DANA-SESSION] Gagal simpan backoff:', saveErr.message);
+            }
         }
     }
 
@@ -129,9 +149,17 @@ async function refreshSession() {
                 console.warn(
                     '[DANA-SESSION] Refresh endpoint menolak (HTTP ' +
                         res.status +
-                        '). Memakai token/cookie yang ada.'
+                        '). Memakai token/cookie yang ada; refresh berikutnya ditunda ' +
+                        REFRESH_FAIL_BACKOFF_MS / 60000 +
+                        ' menit.'
                 );
-                return session;
+                // Persist backoff + updated_at supaya expires_at tidak memicu refresh lagi.
+                return saveSession({
+                    ...session,
+                    refresh_backoff_until: new Date(
+                        Date.now() + REFRESH_FAIL_BACKOFF_MS
+                    ).toISOString()
+                });
             }
             throw new Error(
                 `Refresh gagal HTTP ${res.status}: ${JSON.stringify(res.data).slice(0, 200)}`
@@ -143,7 +171,11 @@ async function refreshSession() {
             body.accessToken || body.access_token || body.token || session.access_token;
         const refresh =
             body.refreshToken || body.refresh_token || session.refresh_token;
-        const expiresIn = body.expiresIn || body.expires_in || 6 * 60 * 60;
+        const rawExpiresIn = Number(body.expiresIn ?? body.expires_in);
+        const expiresIn =
+            Number.isFinite(rawExpiresIn) && rawExpiresIn > 0
+                ? rawExpiresIn
+                : 6 * 60 * 60;
         const cookieFromSet = parseSetCookie(res.headers['set-cookie']);
 
         const updated = saveSession({
@@ -209,10 +241,19 @@ async function verifySession(userAgent) {
             return { ok: false, message: `Sesi invalid (HTTP ${res.status})` };
         }
         if (res.status >= 400) {
-            // Beberapa endpoint beda path — sesi token masih bisa valid
+            // 404 = path mutasi berbeda, sesi biasanya masih valid; status lain = gagal verifikasi.
+            if (res.status === 404) {
+                return {
+                    ok: true,
+                    message:
+                        'Token terpasang, tetapi path mutasi tidak ditemukan (HTTP 404). ' +
+                        'Cek DANA_TX_PATH jika mutasi kosong.',
+                    merchant: loadSession()?.merchant_name || merchantId || null
+                };
+            }
             return {
-                ok: true,
-                message: `Token terpasang (probe HTTP ${res.status}). Cek DANA_TX_PATH jika mutasi kosong.`,
+                ok: false,
+                message: `Sesi tidak dapat diverifikasi (HTTP ${res.status}).`,
                 merchant: loadSession()?.merchant_name || merchantId || null
             };
         }
