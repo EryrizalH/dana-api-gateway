@@ -87,30 +87,50 @@ function generateDynamicQRIS(staticTemplate, amount) {
 }
 
 // ponytail: regex amount extractor handles structured amount or raw push notification text
-function extractAmountFromPayload(body) {
-    if (!body) return null;
+// ponytail: tolerant amount extractor accepting query, json, urlencoded, and plain text
+function extractAmountFromPayload(req) {
+    if (!req) return null;
+    const body = req.body || {};
+    const query = req.query || {};
 
-    if (body.amount !== undefined && body.amount !== null) {
-        const cleaned = String(body.amount).replace(/[^0-9]/g, '');
+    // 1. Direct amount field in body or query
+    const candidateAmount = body.amount ?? query.amount;
+    if (candidateAmount !== undefined && candidateAmount !== null && candidateAmount !== '') {
+        const cleaned = String(candidateAmount).replace(/[^0-9]/g, '');
         const val = parseInt(cleaned, 10);
         if (!isNaN(val) && val > 0) return val;
     }
 
-    const rawText =
-        body.text ||
-        body.message ||
-        body.content ||
-        body.body ||
-        body.notification ||
-        (typeof body === 'string' ? body : '');
+    // 2. Aggregate all possible text sources
+    let rawText = '';
+    if (typeof body === 'string') {
+        rawText = body;
+    } else if (typeof body === 'object') {
+        rawText = [
+            body.text, body.message, body.content, body.body,
+            body.notification, body.title, body.not_title, body.not_body
+        ].filter(Boolean).join(' ');
+    }
+    if (!rawText) {
+        rawText = [query.text, query.message, query.content, query.body, query.title].filter(Boolean).join(' ');
+    }
 
     if (rawText) {
         const match =
-            rawText.match(/(?:rp|idr)\s*([\d\.,]+)/i) ||
-            rawText.match(/(?:sebesar|nominal|terima|masuk)\s*([\d\.,]+)/i);
+            rawText.match(/(?:rp\.?|idr)\s*([\d\.,]+)/i) ||
+            rawText.match(/(?:sebesar|nominal|terima|masuk|berhasil|dana)\s*([\d\.,]+)/i) ||
+            rawText.match(/([\d\.,]+)\s*(?:rupiah)/i);
 
         if (match && match[1]) {
             const cleaned = match[1].replace(/[^0-9]/g, '');
+            const val = parseInt(cleaned, 10);
+            if (!isNaN(val) && val > 0) return val;
+        }
+
+        // Fallback: cari angka nominal >= 100
+        const numMatch = rawText.match(/\b([1-9]\d{2,}(?:[\.,]\d{3})*|\d{3,})\b/);
+        if (numMatch && numMatch[1]) {
+            const cleaned = numMatch[1].replace(/[^0-9]/g, '');
             const val = parseInt(cleaned, 10);
             if (!isNaN(val) && val > 0) return val;
         }
@@ -145,6 +165,18 @@ app.enable('trust proxy');
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ponytail: catch malformed JSON from MacroDroid (e.g. unescaped quotes or newlines)
+app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        return res.status(400).json({
+            success: false,
+            message: 'Format JSON dari MacroDroid tidak valid (biasanya karena ada tanda petik dua " atau enter di pesan notifikasi). Disarankan gunakan Content-Type: application/x-www-form-urlencoded dengan body text=[not_title] [not_body]',
+            error: err.message
+        });
+    }
+    next();
+});
 
 // Periodic update status kedaluwarsa di database
 setInterval(() => {
@@ -290,22 +322,28 @@ app.all('/create-qris', apiKeyAuth, (req, res) => {
     });
 });
 
-// Endpoint POST Notifikasi Pembayaran dari Handphone (MacroDroid / Tasker / NotiSend dsb)
-app.post(['/api/notifications', '/webhook/dana'], apiKeyAuth, (req, res) => {
-    const amount = extractAmountFromPayload(req.body);
+// Endpoint Notifikasi Pembayaran dari Handphone (MacroDroid / Tasker / NotiSend dsb)
+app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, (req, res) => {
+    const amount = extractAmountFromPayload(req);
     const rawText =
         req.body?.text ||
         req.body?.message ||
         req.body?.content ||
         req.body?.body ||
-        (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+        req.query?.text ||
+        req.query?.message ||
+        (typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}));
 
     if (!amount) {
         db.insertNotification(0, rawText, 0, null);
         return res.status(400).json({
             success: false,
-            message: 'Nominal pembayaran tidak ditemukan di payload notifikasi',
-            received_body: req.body
+            message: 'Nominal pembayaran tidak ditemukan di teks notifikasi. Pastikan format teks berisi angka nominal (contoh: "Rp 10.000" atau "sebesar 10000")',
+            received: {
+                body: req.body,
+                query: req.query,
+                extracted_text: rawText
+            }
         });
     }
 
