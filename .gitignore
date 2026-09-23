@@ -5,3 +5,6 @@ node_modules/
 data/
 *.log
 .DS_Store
+*.jpg
+*.jpeg
+*.png
