@@ -8,6 +8,87 @@ const { renderLoginPage, renderDashboardPage } = require('./views');
 // ponytail: stripped external complexity; native node:sqlite for persistence + standard cookie auth
 const PORT = process.env.PORT || 3000;
 const QRIS_EXPIRY_MS = 5 * 60 * 1000; // 5 menit
+const CALLBACK_TIMEOUT_MS = 5000;
+const CALLBACK_MAX_ATTEMPTS = 3;
+const CALLBACK_RETRY_DELAY_MS = 100;
+
+function normalizeReferenceId(value) {
+    const reference = value === undefined || value === null ? '' : String(value).trim();
+    return reference || null;
+}
+
+function getPaymentWebhookConfig(env = process.env) {
+    const url = typeof env.PAYMENT_WEBHOOK_URL === 'string' ? env.PAYMENT_WEBHOOK_URL.trim() : '';
+    const secret = typeof env.PAYMENT_WEBHOOK_SECRET === 'string' ? env.PAYMENT_WEBHOOK_SECRET : '';
+    return { url: url || null, secret: secret || null };
+}
+
+function parsePaymentDetails(value) {
+    if (typeof value !== 'string') return value || null;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return value;
+    }
+}
+
+async function sendPaymentWebhook(transaction, config = getPaymentWebhookConfig(), fetchImpl = fetch) {
+    if (!transaction?.reference_id) {
+        return { status: 'skipped', attempts: 0 };
+    }
+    if (!config.url || !config.secret) {
+        return { status: 'not_configured', attempts: 0 };
+    }
+
+    const payload = {
+        event: 'payment.paid',
+        reference_id: transaction.reference_id,
+        qris_id: transaction.qris_id,
+        trx_id: transaction.trx_id,
+        amount: transaction.amount,
+        status: 'paid',
+        paid_at: transaction.paid_at || null,
+        payment_details: parsePaymentDetails(transaction.payment_details)
+    };
+
+    for (let attempt = 1; attempt <= CALLBACK_MAX_ATTEMPTS; attempt += 1) {
+        const controller = new AbortController();
+        let timeoutId;
+        try {
+            const response = await Promise.race([
+                fetchImpl(config.url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-webhook-secret': config.secret
+                    },
+                    body: JSON.stringify(payload),
+                    signal: controller.signal
+                }),
+                new Promise((_, reject) => {
+                    timeoutId = setTimeout(() => {
+                        controller.abort();
+                        reject(new Error('callback timeout'));
+                    }, CALLBACK_TIMEOUT_MS);
+                })
+            ]);
+            if (response.status >= 200 && response.status < 300) {
+                return { status: 'delivered', attempts: attempt };
+            }
+        } catch {
+            // Callback failure must not change the already-paid gateway transaction.
+        } finally {
+            clearTimeout(timeoutId);
+        }
+
+        if (attempt < CALLBACK_MAX_ATTEMPTS) {
+            await new Promise(resolve => setTimeout(resolve, CALLBACK_RETRY_DELAY_MS));
+        }
+    }
+
+    return { status: 'failed', attempts: CALLBACK_MAX_ATTEMPTS };
+}
+
 
 // In-memory active web sessions (admin)
 const activeSessions = new Set();
@@ -179,13 +260,14 @@ app.use((err, req, res, next) => {
 });
 
 // Periodic update status kedaluwarsa di database
-setInterval(() => {
+const expiryTimer = setInterval(() => {
     try {
         db.updateExpiredTransactions();
     } catch (e) {
         console.error('Error updating expired transactions:', e.message);
     }
 }, 60 * 1000);
+expiryTimer.unref?.();
 
 // Health Check
 app.get('/', (req, res) => {
@@ -290,10 +372,10 @@ app.all('/create-qris', apiKeyAuth, (req, res) => {
 
     const qrisId = Math.random().toString(36).substring(2, 10);
     const trxId = 'TRX-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+    const referenceId = normalizeReferenceId(req.body?.reference_id || req.query?.reference_id);
     const expiresAt = new Date(Date.now() + QRIS_EXPIRY_MS);
     const createdAt = new Date();
 
-    // Simpan ke database SQLite
     db.insertTransaction({
         qris_id: qrisId,
         trx_id: trxId,
@@ -301,7 +383,8 @@ app.all('/create-qris', apiKeyAuth, (req, res) => {
         qris_code: dynamicCode,
         status: 'PENDING',
         created_at: createdAt.toISOString(),
-        expires_at: expiresAt.toISOString()
+        expires_at: expiresAt.toISOString(),
+        reference_id: referenceId
     });
 
     const publicUrl = `${req.protocol}://${req.get('host')}/qr/${qrisId}`;
@@ -312,6 +395,7 @@ app.all('/create-qris', apiKeyAuth, (req, res) => {
         data: {
             qris_id: qrisId,
             trx_id: trxId,
+            reference_id: referenceId,
             qris_url: publicUrl,
             qris_code: dynamicCode,
             amount: parseInt(amount, 10),
@@ -323,7 +407,7 @@ app.all('/create-qris', apiKeyAuth, (req, res) => {
 });
 
 // Endpoint Notifikasi Pembayaran dari Handphone (MacroDroid / Tasker / NotiSend dsb)
-app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, (req, res) => {
+app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, async (req, res) => {
     const amount = extractAmountFromPayload(req);
     const rawText =
         req.body?.text ||
@@ -347,13 +431,13 @@ app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, (req, res) => {
         });
     }
 
-    // Pencocokan FIFO di SQLite
     const matched = db.matchAndPayOldestPending(amount, req.body);
     const timestamp = new Date().toISOString();
 
     if (matched) {
         db.insertNotification(amount, rawText, 1, matched.trx_id);
-        console.log(`[${timestamp}] [NOTIF-PAID] QRIS ID: ${matched.qris_id} | TRX: ${matched.trx_id} | Lunas Rp ${amount}`);
+        const callback = await sendPaymentWebhook(matched);
+        console.log(`[${timestamp}] [NOTIF-PAID] QRIS ID: ${matched.qris_id} | TRX: ${matched.trx_id} | Status: ${matched.status}`);
         return res.json({
             success: true,
             matched: true,
@@ -361,15 +445,17 @@ app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, (req, res) => {
             data: {
                 qris_id: matched.qris_id,
                 trx_id: matched.trx_id,
+                reference_id: matched.reference_id || null,
                 amount: matched.amount,
                 status: 'PAID',
-                paid_at: matched.paid_at
+                paid_at: matched.paid_at,
+                callback
             }
         });
     }
 
     db.insertNotification(amount, rawText, 0, null);
-    console.log(`[${timestamp}] [NOTIF-UNMATCHED] Nominal Rp ${amount} diterima, tapi tidak ada QRIS PENDING yang cocok`);
+    console.log(`[${timestamp}] [NOTIF-UNMATCHED] Status: unmatched | Nominal: ${amount}`);
     return res.json({
         success: true,
         matched: false,
@@ -380,6 +466,7 @@ app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, (req, res) => {
         }
     });
 });
+
 
 // Endpoint Cek Status Pembayaran (API Publik kasir / frontend)
 app.get('/api/qr-status/:id', (req, res) => {
@@ -606,4 +693,12 @@ if (require.main === module) {
     });
 }
 
-module.exports = { app, generateDynamicQRIS, calculateCRC16, extractAmountFromPayload };
+module.exports = {
+    app,
+    generateDynamicQRIS,
+    calculateCRC16,
+    extractAmountFromPayload,
+    getPaymentWebhookConfig,
+    normalizeReferenceId,
+    sendPaymentWebhook
+};

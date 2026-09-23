@@ -112,20 +112,24 @@ Mengubah QRIS statis menjadi dinamis dengan nominal custom dan checksum CRC16 ba
 - **Headers**:
   - `x-api-key`: `aksjdhakshgdchasgvhdsaasdhaskdasd`
   - `Content-Type`: `application/json`
-- **Request Body (JSON)**:
+## Request Body (JSON):
 ```json
 {
   "amount": 25000,
+  "reference_id": "ORD-20260923-1234",
   "qris_static": "000201010211..." // Opsional: jika ingin override template .env
 }
 ```
-- **Response**:
+`reference_id` bersifat opsional untuk integrasi lama. Storefront mengisinya dengan ID order (`ORD-*`) atau topup kredit (`TOPUP-*`), dan nilai kosong disimpan sebagai `null`.
+ 
+ - **Response**:
 ```json
 {
   "success": true,
   "data": {
     "qris_id": "xsvfewtk",
     "trx_id": "TRX-SFNRJ4LO",
+    "reference_id": "ORD-20260923-1234",
     "qris_url": "https://pay.eryrizal.biz.id/qr/xsvfewtk",
     "qris_code": "000201010212...540525000...6304XXXX",
     "amount": 25000,
@@ -173,6 +177,35 @@ Endpoint yang dipanggil oleh handphone/MacroDroid untuk verifikasi pelunasan:
   }
 }
 ```
+
+### Callback Pembayaran ke Worker
+Jika `PAYMENT_WEBHOOK_URL` dan `PAYMENT_WEBHOOK_SECRET` tersedia, setiap transaksi yang berubah menjadi `PAID` dan memiliki `reference_id` mengirim callback terautentikasi ke Worker.
+
+Atur konfigurasi deployment gateway melalui environment atau secret store:
+```env
+PAYMENT_WEBHOOK_URL=https://your-worker.example.com/api/webhooks/qris
+PAYMENT_WEBHOOK_SECRET=your_qris_webhook_secret_here
+```
+
+Request callback:
+```json
+{
+  "event": "payment.paid",
+  "reference_id": "ORD-20260923-1234",
+  "qris_id": "xsvfewtk",
+  "trx_id": "TRX-SFNRJ4LO",
+  "amount": 25000,
+  "status": "paid",
+  "paid_at": "2026-09-23T15:27:28.478Z",
+  "payment_details": {
+    "text": "Kamu telah menerima pembayaran sebesar Rp 25.000"
+  }
+}
+```
+
+Header callback adalah `Content-Type: application/json` dan `x-webhook-secret`. Gateway memakai timeout 5 detik, maksimal tiga percobaan, dan hanya status HTTP 2xx dianggap terkirim. Kegagalan callback tidak membatalkan status `PAID`; response notifikasi tetap mengembalikan status callback `delivered`, `failed`, `not_configured`, atau `skipped`.
+
+Alur notifikasi DANA melalui MacroDroid tetap memakai `/api/notifications` dengan `x-api-key`, sehingga callback Worker tidak menggantikan integrasi MacroDroid.
 
 ---
 

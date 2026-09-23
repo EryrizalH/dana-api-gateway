@@ -23,7 +23,8 @@ db.exec(`
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     paid_at TEXT,
-    payment_details TEXT
+    payment_details TEXT,
+    reference_id TEXT
   );
 
   CREATE TABLE IF NOT EXISTS notifications (
@@ -40,12 +41,18 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tx_trx_id ON transactions(trx_id);
 `);
 
-function insertTransaction({ qris_id, trx_id, amount, qris_code, status, created_at, expires_at }) {
+const transactionColumns = db.prepare('PRAGMA table_info(transactions)').all();
+if (!transactionColumns.some((column) => column.name === 'reference_id')) {
+    db.exec('ALTER TABLE transactions ADD COLUMN reference_id TEXT');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_tx_reference_id ON transactions(reference_id)');
+
+function insertTransaction({ qris_id, trx_id, amount, qris_code, status, created_at, expires_at, reference_id }) {
     const stmt = db.prepare(`
-        INSERT INTO transactions (qris_id, trx_id, amount, qris_code, status, created_at, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO transactions (qris_id, trx_id, amount, qris_code, status, created_at, expires_at, reference_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(qris_id, trx_id, amount, qris_code, status || 'PENDING', created_at, expires_at);
+    stmt.run(qris_id, trx_id, amount, qris_code, status || 'PENDING', created_at, expires_at, reference_id || null);
 }
 
 function updateExpiredTransactions() {
@@ -56,6 +63,7 @@ function updateExpiredTransactions() {
         WHERE status = 'PENDING' AND expires_at < ?
     `).run(nowIso);
 }
+
 
 function getTransactionByQrisId(qrisId) {
     updateExpiredTransactions();
