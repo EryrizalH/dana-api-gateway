@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  dana-gateway:
+  qris-gateway:
     build: .
-    container_name: dana-gateway
+    container_name: qris-gateway
     restart: always
     ports:
       - "3000:3000"
@@ -11,6 +11,6 @@ services:
       - .env
     environment:
       - PORT=3000
+      - DATA_DIR=/app/data
     volumes:
-      # Persist sesi login agar tidak hilang saat container restart
       - ./data:/app/data

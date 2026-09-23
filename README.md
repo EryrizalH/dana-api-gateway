@@ -1,212 +1,140 @@
-# DANA Business Merchant Gateway
+# QRIS Static to Dynamic Generator Gateway
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Node.js-18.x-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
+  <img src="https://img.shields.io/badge/Node.js-22.x+-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
   <img src="https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white" alt="Express" />
-  <img src="https://img.shields.io/badge/Auth-OTP%20Based-0085CA" alt="OTP Auth" />
+  <img src="https://img.shields.io/badge/SQLite-Native%20node%3Asqlite-blue" alt="SQLite" />
   <img src="https://img.shields.io/badge/QRIS-EMVCo-red" alt="QRIS" />
-  <img src="https://img.shields.io/badge/Deploy-VPS%20%7C%20cPanel%20%7C%20Pterodactyl-orange" alt="Deploy Options" />
 </p>
 
-API Gateway self-hosted berbasis Node.js untuk otomatisasi cek transaksi dan cetak QRIS dinamis dari akun **DANA Business / DANA Merchant** kamu.
-
-> Mirror arsitektur [gopay-api-gateaway](../gopay-api-gateaway): endpoint, QRIS EMVCo, anti-klaim ganda, halaman checkout, auto-refresh sesi — diganti branding & backend DANA.
-
----
-
-> [!CAUTION]
-> 🚨 **PERSYARATAN DEPLOYMENT (VPS / cPanel / Pterodactyl)**
-> Gateway ini **dapat di-deploy di VPS, cPanel, maupun Pterodactyl** dengan storage permanen 24/7.
-> **DILARANG hosting serverless gratis** (Render Free, Vercel, Netlify) — container sleep menghapus file sesi (`.DANA_SESI_JANGAN_DIHAPUS.json`).
-
-> [!WARNING]
-> ⚠️ **DISCLAIMER PROYEK TIDAK RESMI:**
-> Project ini **tidak berafiliasi** dengan PT Espay Debit Indonesia Koe / DANA. Gunakan dengan bijak. Polling agresif bisa memicu pembatasan akun. Risiko ditanggung pengguna. Data 100% di server Anda.
-
-> [!NOTE]
-> Endpoint internal DANA Business **bukan API publik resmi**. Path default bisa berubah.
-> Override lewat `.env`: `DANA_API_BASE`, `DANA_TX_PATH`, `DANA_OTP_REQUEST_PATH`, `DANA_OTP_VERIFY_PATH`, `DANA_REFRESH_PATH`.
-> Jika OTP gagal: `node login.js --import` (paste token/cookie dari browser).
+Layanan API Gateway ringan untuk mengubah string QRIS Statis menjadi **QRIS Dinamis (EMVCo)** dengan nominal spesifik, verifikasi pembayaran real-time via notifikasi handphone (MacroDroid / Tasker), dan **Web UI Monitoring Dashboard** dengan database SQLite.
 
 ---
 
 ## ✨ Fitur Utama
 
-- 🔐 **Login OTP Terminal** — `node login.js` (SMS/WA) atau import token manual.
-- 🔄 **Auto-Refresh Token** — refresh background tiap 6 jam. Login cukup 1×.
-- 🧾 **QRIS Dinamis (EMVCo)** — nominal custom dari QRIS statis merchant (CRC16 lokal).
-- 📱 **Halaman Checkout QRIS** — timer 5 menit, cek manual, auto-poll opsional 8s.
-- ✅ **Cek Pembayaran Real-Time** — cocokkan nominal + waktu; `trx_id` anti klaim ganda.
-- 📋 **Riwayat Mutasi** — daftar transaksi rentang waktu.
-- 🌐 **GET & POST** — query URL atau JSON body.
-- 🔒 **API Key + Public QR Status** — backend dilindungi `API_KEY`; frontend aman tanpa key.
-- 🐳 **Docker, PM2 & Pterodactyl Ready**
+- 🧾 **Konversi QRIS Dinamis (EMVCo)**: Mengubah Point of Initiation (Tag 01: `11` -> `12`), menyisipkan nominal transaksi (Tag 54), dan menghitung ulang checksum CRC16 (Tag 63).
+- 📊 **Web UI Dashboard Admin (`/dashboard`)**: Monitoring visual lengkap dengan login session sederhana:
+  - Total QRIS Digenerate
+  - Total Pembayaran Berhasil (PAID)
+  - Total Menunggu Pembayaran (PENDING)
+  - Total Kedaluwarsa (EXPIRED)
+  - Log Notifikasi HP Masuk (Cocok vs Tidak Cocok)
+- 🗄️ **Database SQLite (Zero External Dependencies)**: Menggunakan driver native bawaan Node.js (`node:sqlite`) yang cepat, stabil, dan tanpa perlu install compiler/package npm tambahan.
+- 📱 **Webhook Notifikasi Handphone**: Menerima push notification DANA dari HP (Tasker, MacroDroid, NotiSend, dsb). Otomatis mengekstrak nominal Rp via regex dan mencocokkan transaksi pending (FIFO).
+- 🟢 **Halaman Kasir Real-time (`/qr/:id`)**: Auto-polling yang otomatis berubah menjadi hijau "Lunas / Pembayaran Berhasil" seketika notifikasi masuk dari HP.
+- 🔒 **Proteksi Keamanan**: Endpoint API dilindungi `API_KEY` dan Web UI dilindungi kredensial admin `.env`.
 
 ---
 
-## 💻 Persyaratan
+## 🛠️ Quick Start
 
-- VPS / dedicated / cPanel Node.js ≥ 18 (cPanel: **wajib 18.x**)
-- Akun **DANA Business** aktif + nomor HP
-- QRIS statis merchant (string EMVCo dari app / cetak QR)
-
----
-
-## 🛠️ Quick Start (Lokal)
-
+### 1. Instalasi
 ```bash
+git clone <repo-url>
 cd dana-api-gateway
 npm install
+```
+
+### 2. Konfigurasi Lingkungan (`.env`)
+Salin file `.env.example`:
+```bash
 cp .env.example .env
-# edit .env: API_KEY, QRIS_STATIC, DANA_MERCHANT_ID
-node login.js          # OTP 1×  — atau: node login.js --import
+```
+Sesuaikan isi `.env`:
+```env
+PORT=3000
+API_KEY=rahasia_api_key_kamu
+QRIS_STATIC=000201010211...
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin123
+```
+
+### 3. Jalankan Aplikasi
+```bash
+# Jalankan test verifikasi EMVCo CRC16
+npm test
+
+# Mode Development
+npm run dev
+
+# Mode Production
 npm start
 ```
 
-Contoh `.env`:
-```env
-PORT=3000
-API_KEY=RAHASIA_KAMU
-QRIS_STATIC=00020101021126...
-DANA_MERCHANT_ID=MERCHANT_ID_KAMU
-# Opsional override:
-# DANA_API_BASE=https://api.saas.dana.id
-# DANA_TX_PATH=/v1/merchant/transactions
-```
+---
 
-Sesi tersimpan di `.DANA_SESI_JANGAN_DIHAPUS.json` — **jangan dihapus**.
+## 🖥️ Web UI Dashboard Admin
+
+Buka browser dan akses:
+- **URL**: `http://localhost:3000/dashboard` (akan diarahkan ke `/login` jika belum login)
+- **Default Username**: `admin` (sesuai `ADMIN_USERNAME` di `.env`)
+- **Default Password**: `admin123` (sesuai `ADMIN_PASSWORD` di `.env`)
+
+Fitur Dashboard:
+- Ringkasan statistik nominal & jumlah transaksi.
+- Filter tab: `Semua Transaksi`, `Berhasil (PAID)`, `Pending`, `Expired`, dan `Log Notifikasi HP`.
+- Tombol Refresh cepat dan link langsung ke halaman QR checkout kasir.
 
 ---
 
-## 🚀 Deploy VPS (PM2)
+## 📖 API Documentation
 
-```bash
-npm install
-cp .env.example .env && nano .env
-node login.js
-sudo npm install -g pm2
-pm2 start server.js --name "dana-gateway"
-pm2 save && pm2 startup
-```
-
-### Docker
-
-```bash
-docker compose up -d
-docker compose logs -f
-```
-
-### Nginx (opsional)
-
-```nginx
-server {
-    server_name dana.domainkamu.com;
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+### 1. Generate QRIS Dinamis
+- **Endpoint**: `POST /create-qris` (atau `GET /create-qris?amount=...`)
+- **Headers**:
+  - `x-api-key`: `<API_KEY>`
+  - `Content-Type`: `application/json`
+- **Request Body (JSON)**:
+```json
+{
+  "amount": 25000,
+  "qris_static": "000201010211..." // (Opsional - fallback ke QRIS_STATIC .env)
 }
 ```
-
----
-
-## 🌐 cPanel
-
-1. Upload source → folder `dana-gateway`
-2. **Setup Node.js App**: Node **18.x**, startup file **`server.js`**
-3. Terminal cPanel: `bash setup.sh` (install + login OTP)
-4. Restart app → cek `/health`
-
----
-
-## 🦖 Pterodactyl
-
-1. Login OTP di lokal → upload `.DANA_SESI_JANGAN_DIHAPUS.json`
-2. Upload source + `.env`
-3. Startup: `node server.js`
-4. Console log: `[SERVER] DANA Business Partner Gateway berjalan...`
-
----
-
-## 📡 API Reference
-
-Auth (kecuali `/health`, `/qr/:id`, `/api/qr-status/:id`):
-
-```text
-Header : X-Api-Key: <API_KEY>
-Query  : ?api_key=<API_KEY>
-```
-
-| Endpoint | Keterangan |
-|---|---|
-| `GET /health` | Health check |
-| `GET /token-status` | Validasi sesi DANA |
-| `GET\|POST /create-qris?amount=` | QRIS dinamis 5 menit + `trx_id` |
-| `GET /qr/:id` | Halaman checkout HTML |
-| `GET /api/qr-status/:id` | Status public (tanpa API key) |
-| `GET\|POST /check-payment?amount=&trx_id=` | Cek lunas (S2S) |
-| `GET /transactions` | Mutasi (`startTime`/`endTime` unix, `pageSize`) |
-| `GET /api/logs` | Log gateway |
-
-### Contoh create QRIS
-```http
-GET /create-qris?amount=25000&api_key=RAHASIA
-```
+- **Response**:
 ```json
 {
   "success": true,
   "data": {
-    "qris_id": "abc123xyz",
-    "trx_id": "TRX-A3F8K2M9",
-    "qris_url": "http://host/qr/abc123xyz",
-    "qris_code": "000201010212...",
+    "qris_id": "xsvfewtk",
+    "trx_id": "TRX-SFNRJ4LO",
+    "qris_url": "http://localhost:3000/qr/xsvfewtk",
+    "qris_code": "000201010212...540525000...6304XXXX",
     "amount": 25000,
-    "expires_at": "...",
+    "status": "PENDING",
+    "expires_at": "2026-09-23T15:25:31.548Z",
     "expires_in": "5 menit"
   }
 }
 ```
 
-### Contoh check payment
-```http
-GET /check-payment?amount=25000&trx_id=TRX-A3F8K2M9&api_key=RAHASIA
+### 2. Webhook Notifikasi Pembayaran (Dari Handphone)
+Forward notifikasi DANA yang masuk di HP (menggunakan MacroDroid, Tasker, dll) ke endpoint ini:
+- **Endpoint**: `POST /api/notifications` (atau `POST /webhook/dana`)
+- **Headers / Query**:
+  - `x-api-key: <API_KEY>` (atau parameter query `?api_key=<API_KEY>`)
+  - `Content-Type: application/json`
+
+#### Opsi A: Teks Mentah Notifikasi (Regex Auto-Parse)
+```json
+{
+  "text": "Kamu telah menerima pembayaran sebesar Rp 25.000 dari John Doe"
+}
 ```
 
----
-
-## 📁 Struktur
-
-```
-dana-api-gateway/
-├── server.js                         # Express API + QRIS + verifikasi
-├── login.js                          # CLI Login OTP / import token
-├── sessionManager.js                 # Load/save/refresh sesi
-├── setup.sh                          # Setup VPS/cPanel
-├── selfcheck.js                      # Cek lokal CRC/QRIS (tanpa network)
-├── .env.example
-├── .DANA_SESI_JANGAN_DIHAPUS.json    # Sesi (generated)
-├── Dockerfile
-└── docker-compose.yml
+#### Opsi B: JSON Terstruktur
+```json
+{
+  "amount": 25000
+}
 ```
 
----
+### 3. Tampilan Halaman Pembayaran / Kasir
+- **URL**: `GET /qr/:id`
+- Menampilkan halaman kasir interaktif dengan QR code, nominal, dan batas waktu.
+- Halaman melakukan auto-polling status setiap 3 detik. Ketika notifikasi masuk dari HP, halaman langsung otomatis beralih menampilkan status **🟢 Pembayaran Berhasil / Lunas**.
 
-## 🔧 Troubleshooting
-
-| Gejala | Solusi |
-|---|---|
-| OTP request gagal | `node login.js --import` — paste token dari DevTools business.dana.id |
-| Mutasi HTTP 404 | Set `DANA_TX_PATH` sesuai path real di network tab browser |
-| Token invalid | `node login.js` ulang; pastikan file sesi tidak dihapus |
-| QRIS generate error | Pastikan `QRIS_STATIC` string EMVCo utuh (tag 00…63) |
-
----
-
-## ⚠️ Catatan Integrasi DANA
-
-Gateway ini **mirror kontrak API** GoPay gateway (path + response shape) supaya store/bot yang sudah terintegrasi GoPay tinggal ganti base URL + env.
-
-Adapter transaksi menormalisasi field DANA yang bervariasi (`amount` / `totalAmount` / `payAmount`, `orderId` / `acquirementId`, dll). Jika payload merchant Anda beda total, sesuaikan `normalizeTransactions` / `extractRawTransactions` di `server.js`.
+### 4. Cek Status Pembayaran (API)
+- **Endpoint**: `GET /check-payment?trx_id=...` (atau `?qris_id=...`)
+- **Headers**: `x-api-key: <API_KEY>`

@@ -1,8 +1,6 @@
 node_modules/
 .env
-.DANA_SESI_JANGAN_DIHAPUS.json
-.dana_cache.json
-data/
+database.sqlite*
 *.log
 .DS_Store
 *.jpg
