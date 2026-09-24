@@ -10,7 +10,8 @@ const {
     generateDynamicQRIS,
     calculateCRC16,
     normalizeReferenceId,
-    sendPaymentWebhook
+    sendPaymentWebhook,
+    processExpiredWebhooks
 } = require('./server');
 const db = require('./db');
 
@@ -55,6 +56,19 @@ assert.strictEqual(db.getTransactionByTrxId('TRX-SELFCHECK').reference_id, refer
 const paid = db.matchAndPayOldestPending(25000, { text: 'selfcheck payment' });
 assert.strictEqual(paid.reference_id, referenceId);
 
+// Insert an expired transaction with reference_id
+const expiredRefId = normalizeReferenceId('SELF-CHECK-EXP-001');
+const pastExpiresAt = new Date(Date.now() - 10000).toISOString();
+db.insertTransaction({
+    qris_id: 'selfcheck-qris-expired',
+    trx_id: 'TRX-SELFCHECK-EXP',
+    amount: 15000,
+    qris_code: dyn,
+    created_at: new Date(Date.now() - 60000).toISOString(),
+    expires_at: pastExpiresAt,
+    reference_id: expiredRefId
+});
+
 let callbackRequest;
 const callbackResult = sendPaymentWebhook(
     paid,
@@ -65,7 +79,7 @@ const callbackResult = sendPaymentWebhook(
     }
 );
 
-callbackResult.then((result) => {
+callbackResult.then(async (result) => {
     assert.deepStrictEqual(result, { status: 'delivered', attempts: 1 });
     const payload = JSON.parse(callbackRequest.options.body);
     assert.deepStrictEqual(payload, {
@@ -79,6 +93,43 @@ callbackResult.then((result) => {
         payment_details: { text: 'selfcheck payment' }
     });
     assert.strictEqual(callbackRequest.options.headers['x-webhook-secret'], 'selfcheck-secret');
+
+    // Test processExpiredWebhooks
+    let expiredWebhookRequest;
+    const expiredDispatches = await processExpiredWebhooks(
+        { url: 'http://worker.local/api/webhooks/qris', secret: 'selfcheck-secret' },
+        async (url, options) => {
+            expiredWebhookRequest = { url, options };
+            return new Response(null, { status: 204 });
+        }
+    );
+
+    assert.strictEqual(expiredDispatches.length, 1);
+    assert.strictEqual(expiredDispatches[0].reference_id, expiredRefId);
+    assert.deepStrictEqual(expiredDispatches[0].callback, { status: 'delivered', attempts: 1 });
+
+    const expiredPayload = JSON.parse(expiredWebhookRequest.options.body);
+    assert.strictEqual(expiredPayload.event, 'payment.expired');
+    assert.strictEqual(expiredPayload.status, 'expired');
+    assert.strictEqual(expiredPayload.reference_id, expiredRefId);
+    assert.strictEqual(expiredPayload.qris_id, 'selfcheck-qris-expired');
+    assert.strictEqual(expiredPayload.trx_id, 'TRX-SELFCHECK-EXP');
+    assert.strictEqual(expiredPayload.amount, 15000);
+    assert.strictEqual(expiredPayload.expired_at, pastExpiresAt);
+    assert.strictEqual(expiredWebhookRequest.options.headers['x-webhook-secret'], 'selfcheck-secret');
+
+    // Second call must NOT re-send (no duplicate callbacks)
+    let duplicateCalled = false;
+    const secondDispatches = await processExpiredWebhooks(
+        { url: 'http://worker.local/api/webhooks/qris', secret: 'selfcheck-secret' },
+        async () => {
+            duplicateCalled = true;
+            return new Response(null, { status: 204 });
+        }
+    );
+    assert.strictEqual(secondDispatches.length, 0);
+    assert.strictEqual(duplicateCalled, false);
+
     db.db.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
     console.log('selfcheck OK');

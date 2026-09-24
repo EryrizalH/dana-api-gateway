@@ -24,7 +24,8 @@ db.exec(`
     expires_at TEXT NOT NULL,
     paid_at TEXT,
     payment_details TEXT,
-    reference_id TEXT
+    reference_id TEXT,
+    expiry_webhook_sent INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS notifications (
@@ -47,6 +48,10 @@ if (!transactionColumns.some((column) => column.name === 'reference_id')) {
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_tx_reference_id ON transactions(reference_id)');
 
+if (!transactionColumns.some((column) => column.name === 'expiry_webhook_sent')) {
+    db.exec('ALTER TABLE transactions ADD COLUMN expiry_webhook_sent INTEGER DEFAULT 0');
+}
+
 function insertTransaction({ qris_id, trx_id, amount, qris_code, status, created_at, expires_at, reference_id }) {
     const stmt = db.prepare(`
         INSERT INTO transactions (qris_id, trx_id, amount, qris_code, status, created_at, expires_at, reference_id)
@@ -62,6 +67,23 @@ function updateExpiredTransactions() {
         SET status = 'EXPIRED'
         WHERE status = 'PENDING' AND expires_at < ?
     `).run(nowIso);
+}
+
+function getPendingExpiryWebhooks() {
+    return db.prepare(`
+        SELECT * FROM transactions
+        WHERE status = 'EXPIRED'
+          AND reference_id IS NOT NULL
+          AND (expiry_webhook_sent IS NULL OR expiry_webhook_sent = 0)
+    `).all();
+}
+
+function markExpiryWebhookSent(id) {
+    db.prepare(`
+        UPDATE transactions
+        SET expiry_webhook_sent = 1
+        WHERE id = ?
+    `).run(id);
 }
 
 
@@ -150,5 +172,7 @@ module.exports = {
     insertNotification,
     getDashboardStats,
     getTransactions,
-    getNotifications
+    getNotifications,
+    getPendingExpiryWebhooks,
+    markExpiryWebhookSent
 };

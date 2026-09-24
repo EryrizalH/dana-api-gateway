@@ -40,15 +40,17 @@ async function sendPaymentWebhook(transaction, config = getPaymentWebhookConfig(
         return { status: 'not_configured', attempts: 0 };
     }
 
+    const isExpired = String(transaction.status).toUpperCase() === 'EXPIRED';
     const payload = {
-        event: 'payment.paid',
+        event: isExpired ? 'payment.expired' : 'payment.paid',
         reference_id: transaction.reference_id,
         qris_id: transaction.qris_id,
         trx_id: transaction.trx_id,
         amount: transaction.amount,
-        status: 'paid',
-        paid_at: transaction.paid_at || null,
-        payment_details: parsePaymentDetails(transaction.payment_details)
+        status: isExpired ? 'expired' : 'paid',
+        ...(isExpired
+            ? { expired_at: transaction.expires_at || new Date().toISOString() }
+            : { paid_at: transaction.paid_at || null, payment_details: parsePaymentDetails(transaction.payment_details) })
     };
 
     for (let attempt = 1; attempt <= CALLBACK_MAX_ATTEMPTS; attempt += 1) {
@@ -87,6 +89,30 @@ async function sendPaymentWebhook(transaction, config = getPaymentWebhookConfig(
     }
 
     return { status: 'failed', attempts: CALLBACK_MAX_ATTEMPTS };
+}
+
+// In-flight guard to avoid concurrent duplicate webhook dispatches for expired transactions
+const inFlightExpiryWebhooks = new Set();
+
+async function processExpiredWebhooks(config = getPaymentWebhookConfig(), fetchImpl = fetch) {
+    db.updateExpiredTransactions();
+    const pending = db.getPendingExpiryWebhooks();
+    const results = [];
+    for (const tx of pending) {
+        if (inFlightExpiryWebhooks.has(tx.id)) continue;
+        inFlightExpiryWebhooks.add(tx.id);
+        try {
+            const callback = await sendPaymentWebhook(tx, config, fetchImpl);
+            db.markExpiryWebhookSent(tx.id);
+            console.log(`[${new Date().toISOString()}] [WEBHOOK-EXPIRED] QRIS ID: ${tx.qris_id} | Ref: ${tx.reference_id} | Status: expired | Callback: ${callback.status}`);
+            results.push({ id: tx.id, reference_id: tx.reference_id, callback });
+        } catch (err) {
+            console.error(`[EXPIRY-WEBHOOK] Gagal kirim webhook expiry untuk ref ${tx.reference_id}:`, err.message);
+        } finally {
+            inFlightExpiryWebhooks.delete(tx.id);
+        }
+    }
+    return results;
 }
 
 
@@ -259,13 +285,11 @@ app.use((err, req, res, next) => {
     next();
 });
 
-// Periodic update status kedaluwarsa di database
+// Periodic update status kedaluwarsa di database & webhook callback expiry
 const expiryTimer = setInterval(() => {
-    try {
-        db.updateExpiredTransactions();
-    } catch (e) {
-        console.error('Error updating expired transactions:', e.message);
-    }
+    processExpiredWebhooks().catch((e) => {
+        console.error('Error updating expired transactions / webhooks:', e.message);
+    });
 }, 60 * 1000);
 expiryTimer.unref?.();
 
@@ -475,6 +499,10 @@ app.get('/api/qr-status/:id', (req, res) => {
         return res.status(404).json({ success: false, status: 'NOT_FOUND', message: 'QRIS tidak ditemukan' });
     }
 
+    if (tx.status === 'EXPIRED' && tx.reference_id && !tx.expiry_webhook_sent) {
+        processExpiredWebhooks().catch((err) => console.error('Error sending expiry webhook on status check:', err.message));
+    }
+
     res.json({
         success: true,
         qris_id: tx.qris_id,
@@ -504,6 +532,10 @@ app.all('/check-payment', apiKeyAuth, (req, res) => {
             success: false,
             message: 'Transaksi tidak ditemukan'
         });
+    }
+
+    if (tx.status === 'EXPIRED' && tx.reference_id && !tx.expiry_webhook_sent) {
+        processExpiredWebhooks().catch((err) => console.error('Error sending expiry webhook on check-payment:', err.message));
     }
 
     res.json({
@@ -545,6 +577,10 @@ app.get('/qr/:id', (req, res) => {
     const tx = db.getTransactionByQrisId(req.params.id);
     if (!tx) {
         return res.status(404).send('<h3 style="font-family:sans-serif;text-align:center;margin-top:40px;">QRIS tidak ditemukan atau telah kedaluwarsa</h3>');
+    }
+
+    if (tx.status === 'EXPIRED' && tx.reference_id && !tx.expiry_webhook_sent) {
+        processExpiredWebhooks().catch((err) => console.error('Error sending expiry webhook on /qr view:', err.message));
     }
 
     if (req.query.format === 'raw' || req.query.raw === '1') {
@@ -690,6 +726,9 @@ if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`[SYSTEM] QRIS Dynamic Gateway berjalan pada port ${PORT}`);
         console.log(`[SYSTEM] Dashboard Admin: http://localhost:${PORT}/dashboard`);
+        processExpiredWebhooks().catch((err) => {
+            console.error('Initial expiry webhook check error:', err.message);
+        });
     });
 }
 
@@ -700,5 +739,6 @@ module.exports = {
     extractAmountFromPayload,
     getPaymentWebhookConfig,
     normalizeReferenceId,
-    sendPaymentWebhook
+    sendPaymentWebhook,
+    processExpiredWebhooks
 };

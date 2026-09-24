@@ -179,7 +179,7 @@ Endpoint yang dipanggil oleh handphone/MacroDroid untuk verifikasi pelunasan:
 ```
 
 ### Callback Pembayaran ke Worker
-Jika `PAYMENT_WEBHOOK_URL` dan `PAYMENT_WEBHOOK_SECRET` tersedia, setiap transaksi yang berubah menjadi `PAID` dan memiliki `reference_id` mengirim callback terautentikasi ke Worker.
+Jika `PAYMENT_WEBHOOK_URL` dan `PAYMENT_WEBHOOK_SECRET` tersedia, transaksi yang memiliki `reference_id` mengirim callback terautentikasi ke Worker/Storefront saat berubah menjadi `PAID` atau `EXPIRED`.
 
 Atur konfigurasi deployment gateway melalui environment atau secret store:
 ```env
@@ -187,7 +187,7 @@ PAYMENT_WEBHOOK_URL=https://your-worker.example.com/api/webhooks/qris
 PAYMENT_WEBHOOK_SECRET=your_qris_webhook_secret_here
 ```
 
-Request callback:
+Request callback saat lunas (`payment.paid`):
 ```json
 {
   "event": "payment.paid",
@@ -203,7 +203,20 @@ Request callback:
 }
 ```
 
-Header callback adalah `Content-Type: application/json` dan `x-webhook-secret`. Gateway memakai timeout 5 detik, maksimal tiga percobaan, dan hanya status HTTP 2xx dianggap terkirim. Kegagalan callback tidak membatalkan status `PAID`; response notifikasi tetap mengembalikan status callback `delivered`, `failed`, `not_configured`, atau `skipped`.
+Request callback saat kedaluwarsa (`payment.expired`):
+```json
+{
+  "event": "payment.expired",
+  "reference_id": "ORD-20260923-1234",
+  "qris_id": "xsvfewtk",
+  "trx_id": "TRX-SFNRJ4LO",
+  "amount": 25000,
+  "status": "expired",
+  "expired_at": "2026-09-23T15:32:28.478Z"
+}
+```
+
+Header callback adalah `Content-Type: application/json` dan `x-webhook-secret`. Gateway memakai timeout 5 detik, maksimal tiga percobaan, dan hanya status HTTP 2xx dianggap terkirim. Kegagalan callback tidak membatalkan status transaksi di gateway; callback untuk status expired dikirim otomatis saat pengecekan status, saat background timer berjalan, atau saat gateway dimulai ulang.
 
 Alur notifikasi DANA melalui MacroDroid tetap memakai `/api/notifications` dengan `x-api-key`, sehingga callback Worker tidak menggantikan integrasi MacroDroid.
 
