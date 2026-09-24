@@ -103,7 +103,9 @@ async function processExpiredWebhooks(config = getPaymentWebhookConfig(), fetchI
         inFlightExpiryWebhooks.add(tx.id);
         try {
             const callback = await sendPaymentWebhook(tx, config, fetchImpl);
-            db.markExpiryWebhookSent(tx.id);
+            if (callback.status === 'delivered' || callback.status === 'skipped') {
+                db.markExpiryWebhookSent(tx.id);
+            }
             console.log(`[${new Date().toISOString()}] [WEBHOOK-EXPIRED] QRIS ID: ${tx.qris_id} | Ref: ${tx.reference_id} | Status: expired | Callback: ${callback.status}`);
             results.push({ id: tx.id, reference_id: tx.reference_id, callback });
         } catch (err) {
@@ -726,6 +728,9 @@ if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`[SYSTEM] QRIS Dynamic Gateway berjalan pada port ${PORT}`);
         console.log(`[SYSTEM] Dashboard Admin: http://localhost:${PORT}/dashboard`);
+        try {
+            db.resetExpiredWebhooks();
+        } catch {}
         processExpiredWebhooks().catch((err) => {
             console.error('Initial expiry webhook check error:', err.message);
         });

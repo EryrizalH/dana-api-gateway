@@ -86,6 +86,14 @@ function markExpiryWebhookSent(id) {
     `).run(id);
 }
 
+function resetExpiredWebhooks() {
+    db.exec(`
+        UPDATE transactions
+        SET expiry_webhook_sent = 0
+        WHERE status = 'EXPIRED'
+    `);
+}
+
 
 function getTransactionByQrisId(qrisId) {
     updateExpiredTransactions();
@@ -174,5 +182,6 @@ module.exports = {
     getTransactions,
     getNotifications,
     getPendingExpiryWebhooks,
-    markExpiryWebhookSent
+    markExpiryWebhookSent,
+    resetExpiredWebhooks
 };
