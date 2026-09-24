@@ -77,6 +77,9 @@ async function sendPaymentWebhook(transaction, config = getPaymentWebhookConfig(
             if (response.status >= 200 && response.status < 300) {
                 return { status: 'delivered', attempts: attempt };
             }
+            if (response.status === 400 || response.status === 404 || response.status === 422) {
+                return { status: 'rejected', httpStatus: response.status, attempts: attempt };
+            }
         } catch {
             // Callback failure must not change the already-paid gateway transaction.
         } finally {
@@ -103,7 +106,8 @@ async function processExpiredWebhooks(config = getPaymentWebhookConfig(), fetchI
         inFlightExpiryWebhooks.add(tx.id);
         try {
             const callback = await sendPaymentWebhook(tx, config, fetchImpl);
-            if (callback.status === 'delivered' || callback.status === 'skipped') {
+            // Mark sent on delivered, skipped, permanent rejection (404/400), or when retries are exhausted to avoid infinite loop
+            if (callback.status === 'delivered' || callback.status === 'skipped' || callback.status === 'rejected' || callback.status === 'failed') {
                 db.markExpiryWebhookSent(tx.id);
             }
             console.log(`[${new Date().toISOString()}] [WEBHOOK-EXPIRED] QRIS ID: ${tx.qris_id} | Ref: ${tx.reference_id} | Status: expired | Callback: ${callback.status}`);
@@ -252,6 +256,7 @@ function extractAmountFromPayload(req) {
 const apiKeyAuth = (req, res, next) => {
     const apiKey = req.headers['x-api-key'] || req.query.api_key || req.query.apikey;
     if (!apiKey || apiKey !== process.env.API_KEY) {
+        console.warn(`[AUTH-FAILED] Unauthorized ${req.method} ${req.originalUrl || req.url} from ${req.ip} | Key: ${apiKey ? apiKey.substring(0, 4) + '***' : '(none)'}`);
         return res
             .status(401)
             .json({ success: false, message: 'Autentikasi Gagal: API Key tidak valid' });
@@ -444,6 +449,8 @@ app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, async (req, res) =>
         req.query?.message ||
         (typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}));
 
+    console.log(`[${new Date().toISOString()}] [NOTIF-RECEIVED] IP: ${req.ip} | Type: ${req.headers['content-type']} | Detected Amount: ${amount || 0} | Raw: ${String(rawText).substring(0, 120)}`);
+
     if (!amount) {
         db.insertNotification(0, rawText, 0, null);
         return res.status(400).json({
@@ -496,7 +503,7 @@ app.all(['/api/notifications', '/webhook/dana'], apiKeyAuth, async (req, res) =>
 
 // Endpoint Cek Status Pembayaran (API Publik kasir / frontend)
 app.get('/api/qr-status/:id', (req, res) => {
-    const tx = db.getTransactionByQrisId(req.params.id);
+    const tx = db.getTransactionByQrisId(req.params.id) || db.getTransactionByTrxId(req.params.id);
     if (!tx) {
         return res.status(404).json({ success: false, status: 'NOT_FOUND', message: 'QRIS tidak ditemukan' });
     }
@@ -524,9 +531,9 @@ app.all('/check-payment', apiKeyAuth, (req, res) => {
 
     let tx = null;
     if (qrisId) {
-        tx = db.getTransactionByQrisId(qrisId);
+        tx = db.getTransactionByQrisId(qrisId) || db.getTransactionByTrxId(qrisId);
     } else if (trxId) {
-        tx = db.getTransactionByTrxId(trxId);
+        tx = db.getTransactionByTrxId(trxId) || db.getTransactionByQrisId(trxId);
     }
 
     if (!tx) {
@@ -555,7 +562,7 @@ app.all('/check-payment', apiKeyAuth, (req, res) => {
 
 // Detail data QRIS via API (JSON)
 app.get('/api/qr/:id', (req, res) => {
-    const tx = db.getTransactionByQrisId(req.params.id);
+    const tx = db.getTransactionByQrisId(req.params.id) || db.getTransactionByTrxId(req.params.id);
     if (!tx) {
         return res.status(404).json({ success: false, message: 'QRIS tidak ditemukan atau kedaluwarsa' });
     }
@@ -576,7 +583,7 @@ app.get('/api/qr/:id', (req, res) => {
 
 // Halaman Display Kasir QRIS Interaktif dengan Auto-Polling
 app.get('/qr/:id', (req, res) => {
-    const tx = db.getTransactionByQrisId(req.params.id);
+    const tx = db.getTransactionByQrisId(req.params.id) || db.getTransactionByTrxId(req.params.id);
     if (!tx) {
         return res.status(404).send('<h3 style="font-family:sans-serif;text-align:center;margin-top:40px;">QRIS tidak ditemukan atau telah kedaluwarsa</h3>');
     }
@@ -728,9 +735,6 @@ if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`[SYSTEM] QRIS Dynamic Gateway berjalan pada port ${PORT}`);
         console.log(`[SYSTEM] Dashboard Admin: http://localhost:${PORT}/dashboard`);
-        try {
-            db.resetExpiredWebhooks();
-        } catch {}
         processExpiredWebhooks().catch((err) => {
             console.error('Initial expiry webhook check error:', err.message);
         });

@@ -130,6 +130,30 @@ callbackResult.then(async (result) => {
     assert.strictEqual(secondDispatches.length, 0);
     assert.strictEqual(duplicateCalled, false);
 
+    // Test non-retryable 404 response (e.g. order not found) is marked sent
+    db.insertTransaction({
+        qris_id: 'selfcheck-qris-404',
+        trx_id: 'TRX-SELFCHECK-404',
+        amount: 5000,
+        qris_code: dyn,
+        created_at: new Date(Date.now() - 60000).toISOString(),
+        expires_at: pastExpiresAt,
+        reference_id: 'NONEXISTENT_ORDER'
+    });
+    const dispatches404 = await processExpiredWebhooks(
+        { url: 'http://worker.local/api/webhooks/qris', secret: 'selfcheck-secret' },
+        async () => new Response(JSON.stringify({ error: 'Order not found' }), { status: 404 })
+    );
+    assert.strictEqual(dispatches404.length, 1);
+    assert.strictEqual(dispatches404[0].callback.status, 'rejected');
+
+    // Next run must not retry the 404
+    const nextDispatches404 = await processExpiredWebhooks(
+        { url: 'http://worker.local/api/webhooks/qris', secret: 'selfcheck-secret' },
+        async () => new Response(null, { status: 204 })
+    );
+    assert.strictEqual(nextDispatches404.length, 0);
+
     db.db.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
     console.log('selfcheck OK');
