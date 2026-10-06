@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { randomBytes } = require('node:crypto');
 require('dotenv').config();
 
 const db = require('./db');
@@ -123,7 +124,7 @@ async function processExpiredWebhooks(config = getPaymentWebhookConfig(), fetchI
 
 
 // In-memory active web sessions (admin)
-const activeSessions = new Set();
+const activeSessions = new Map();
 
 // ponytail: one-line cookie parser, no cookie-parser package needed
 function getCookies(req) {
@@ -199,6 +200,29 @@ function generateDynamicQRIS(staticTemplate, amount) {
     return result + calculateCRC16(result);
 }
 
+function createQrisTransaction({ amount, staticTemplate, referenceId = null }) {
+    const dynamicCode = generateDynamicQRIS(staticTemplate, amount);
+    if (!dynamicCode) return null;
+
+    const qrisId = Math.random().toString(36).substring(2, 10);
+    const trxId = 'TRX-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + QRIS_EXPIRY_MS);
+    const data = {
+        qris_id: qrisId,
+        trx_id: trxId,
+        reference_id: referenceId,
+        qris_code: dynamicCode,
+        amount: parseInt(amount, 10),
+        status: 'PENDING',
+        expires_at: expiresAt.toISOString(),
+        expires_in: '5 menit'
+    };
+    db.insertTransaction({ ...data, created_at: createdAt.toISOString() });
+    console.log(`[${createdAt.toISOString()}] [QRIS] Created ID: ${qrisId} | TRX: ${trxId} | Rp ${amount}`);
+    return data;
+}
+
 // ponytail: regex amount extractor handles structured amount or raw push notification text
 // ponytail: tolerant amount extractor accepting query, json, urlencoded, and plain text
 function extractAmountFromPayload(req) {
@@ -269,6 +293,7 @@ const authWeb = (req, res, next) => {
     const cookies = getCookies(req);
     const token = cookies.gateway_session;
     if (token && activeSessions.has(token)) {
+        res.locals.webSession = activeSessions.get(token);
         return next();
     }
     res.redirect('/login');
@@ -313,6 +338,10 @@ app.get(['/health', '/api/health'], (req, res) => {
     });
 });
 
+app.get('/assets/dashboard.js', (req, res) => {
+    res.sendFile(__dirname + '/public/dashboard.js');
+});
+
 // --- ADMIN WEB UI ROUTES ---
 
 app.get('/login', (req, res) => {
@@ -330,8 +359,8 @@ app.post('/login', (req, res) => {
     const adminPass = process.env.ADMIN_PASSWORD || 'admin123';
 
     if (username === adminUser && password === adminPass) {
-        const token = Math.random().toString(36).substring(2) + Date.now().toString(36);
-        activeSessions.add(token);
+        const token = randomBytes(32).toString('hex');
+        activeSessions.set(token, { csrfToken: randomBytes(32).toString('hex') });
         res.setHeader('Set-Cookie', `gateway_session=${token}; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax`);
         return res.redirect('/dashboard');
     }
@@ -349,8 +378,13 @@ app.get('/logout', (req, res) => {
     res.redirect('/login');
 });
 
-app.get('/dashboard', authWeb, (req, res) => {
-    const tab = req.query.tab || 'all';
+function sendDashboard(req, res, options = {}) {
+    const tabs = ['all', 'paid', 'pending', 'expired', 'notifications'];
+    const requestedTab = options.tab || req.query.tab;
+    const tab = tabs.includes(requestedTab) ? requestedTab : 'all';
+    const selectedId = options.selectedId ?? req.query.payment;
+    const paymentId = typeof selectedId === 'string' ? selectedId : '';
+    const payment = paymentId ? db.getTransactionByQrisId(paymentId) : null;
     const stats = db.getDashboardStats();
 
     let transactions = [];
@@ -370,7 +404,59 @@ app.get('/dashboard', authWeb, (req, res) => {
     }
 
     res.setHeader('Content-Type', 'text/html');
-    res.send(renderDashboardPage(stats, transactions, notifications, tab));
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(options.status || 200).send(renderDashboardPage(stats, transactions, notifications, tab, {
+        csrfToken: res.locals.webSession.csrfToken,
+        qrisConfigured: Boolean(process.env.QRIS_STATIC?.trim()),
+        payment,
+        selectedId: paymentId,
+        paymentError: paymentId && !payment ? 'Pembayaran tidak ditemukan. Buat QRIS baru atau pilih transaksi dari riwayat.' : null,
+        error: options.error || null,
+        formAmount: options.formAmount || ''
+    }));
+}
+
+app.get('/dashboard', authWeb, (req, res) => {
+    sendDashboard(req, res);
+});
+
+app.post('/dashboard/create-qris', authWeb, (req, res) => {
+    const formAmount = typeof req.body.amount === 'string' ? req.body.amount : '';
+    const options = { formAmount, tab: req.body.tab, selectedId: req.body.payment || '' };
+    if (req.body.csrf_token !== res.locals.webSession.csrfToken) {
+        return sendDashboard(req, res, {
+            ...options, status: 403,
+            error: 'Form tidak valid atau sesi telah berubah. Muat ulang dashboard lalu coba kembali.'
+        });
+    }
+
+    const amountText = formAmount.trim();
+    const amount = Number(amountText);
+    if (!/^\d+$/.test(amountText) || !Number.isSafeInteger(amount) || amount <= 0) {
+        return sendDashboard(req, res, {
+            ...options, status: 400,
+            error: 'Masukkan nominal rupiah berupa bilangan bulat positif, tanpa titik, koma, atau notasi eksponen.'
+        });
+    }
+
+    const staticTemplate = process.env.QRIS_STATIC?.trim();
+    if (!staticTemplate) {
+        return sendDashboard(req, res, {
+            ...options, status: 500,
+            error: 'QRIS statis belum dikonfigurasi. Pembuatan pembayaran belum tersedia.'
+        });
+    }
+
+    try {
+        const payment = createQrisTransaction({ amount, staticTemplate });
+        if (!payment) throw new Error('QRIS generation failed');
+        return res.redirect(303, '/dashboard?tab=all&payment=' + encodeURIComponent(payment.qris_id));
+    } catch {
+        return sendDashboard(req, res, {
+            ...options, status: 500,
+            error: 'Pembayaran gagal dibuat. Periksa riwayat transaksi sebelum mencoba kembali.'
+        });
+    }
 });
 
 // --- API ROUTES ---
@@ -393,46 +479,22 @@ app.all('/create-qris', apiKeyAuth, (req, res) => {
         });
     }
 
-    const dynamicCode = generateDynamicQRIS(staticTemplate, amount);
-    if (!dynamicCode) {
+    const referenceId = normalizeReferenceId(req.body?.reference_id || req.query?.reference_id);
+    const data = createQrisTransaction({ amount, staticTemplate, referenceId });
+    if (!data) {
         return res.status(500).json({
             success: false,
             message: 'Gagal men-generate QRIS dinamis dari template statis yang diberikan'
         });
     }
 
-    const qrisId = Math.random().toString(36).substring(2, 10);
-    const trxId = 'TRX-' + Math.random().toString(36).substring(2, 10).toUpperCase();
-    const referenceId = normalizeReferenceId(req.body?.reference_id || req.query?.reference_id);
-    const expiresAt = new Date(Date.now() + QRIS_EXPIRY_MS);
-    const createdAt = new Date();
-
-    db.insertTransaction({
-        qris_id: qrisId,
-        trx_id: trxId,
-        amount: parseInt(amount, 10),
-        qris_code: dynamicCode,
-        status: 'PENDING',
-        created_at: createdAt.toISOString(),
-        expires_at: expiresAt.toISOString(),
-        reference_id: referenceId
-    });
-
-    const publicUrl = `${req.protocol}://${req.get('host')}/qr/${qrisId}`;
-    console.log(`[${createdAt.toISOString()}] [QRIS] Created ID: ${qrisId} | TRX: ${trxId} | Rp ${amount}`);
+    const publicUrl = `${req.protocol}://${req.get('host')}/qr/${data.qris_id}`;
 
     res.json({
         success: true,
         data: {
-            qris_id: qrisId,
-            trx_id: trxId,
-            reference_id: referenceId,
+            ...data,
             qris_url: publicUrl,
-            qris_code: dynamicCode,
-            amount: parseInt(amount, 10),
-            status: 'PENDING',
-            expires_at: expiresAt.toISOString(),
-            expires_in: '5 menit'
         }
     });
 });

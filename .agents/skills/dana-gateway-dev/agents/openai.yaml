@@ -1,0 +1,4 @@
+interface:
+  display_name: "DANA Gateway"
+  short_description: "QRIS gateway development and local verification"
+  default_prompt: "Gunakan $dana-gateway-dev untuk memeriksa perubahan gateway QRIS dan menjalankan verifikasi lokal."

@@ -13,6 +13,39 @@ Layanan API Gateway ringan untuk mengubah string QRIS Statis menjadi **QRIS Dina
 - **Production Domain**: `https://pay.eryrizal.biz.id`
 - **Dashboard Admin**: `https://pay.eryrizal.biz.id/dashboard`
 
+## Audit dan integrasi platform lain
+
+[Audit fungsional 6 Oktober 2026](docs/functional-audit-2026-10-06.md) memuat
+bukti lokal, prioritas temuan, dan batas verifikasi. Alur normal lulus pemeriksaan
+lokal, tetapi masih ada risiko parsing nominal, duplikasi matching/callback,
+kehilangan callback, serta masalah script kasir. Source runtime belum diperbaiki
+dalam audit ini; status PAID berasal dari notifikasi HP, bukan API settlement DANA.
+
+Gunakan [panduan integrasi](docs/integration.md),
+[SDK JavaScript/TypeScript](sdk/javascript/README.md), dan
+[kontrak OpenAPI](docs/openapi.json). Contoh tersedia untuk
+[Node](examples/node-client.mjs), [PHP/Laravel](examples/php-client.php), dan
+[Python](examples/python-client.py). Paket SDK dipasang dari folder lokal atau
+tarball internal dan belum dipublikasikan ke npm.
+
+`npm run test:sdk` memeriksa client dan integrasi HTTP lokal.
+`npm run audit:functional` mereproduksi temuan dengan fixture sementara;
+output `OBSERVED` dan exit 0 menandakan reproduksi berhasil, bukan temuan selesai.
+
+## Workflow pengembangan dengan Codex
+
+Panduan proyek ada di [AGENTS.md](AGENTS.md). Gunakan skill lokal
+[`$dana-gateway-dev`](.agents/skills/dana-gateway-dev/SKILL.md) untuk perubahan
+gateway, diagnosis notifikasi/callback, dan verifikasi. Lihat
+[peta stack dan kontrak](.agents/skills/dana-gateway-dev/references/project-map.md)
+serta [workflow dan contoh prompt](.agents/skills/dana-gateway-dev/references/workflows.md).
+
+Gunakan Node.js **22.13+** yang menyediakan `node:sqlite` tanpa flag, lalu `npm ci`
+bila dependency belum terpasang. Jalankan `npm run verify` untuk syntax check,
+selfcheck, dan HTTP smoke test dengan SQLite sementara serta callback mock lokal.
+Helper tidak membaca `.env` proyek atau mengirim callback produksi; hasilnya
+merupakan verifikasi lokal, bukan verifikasi pembayaran nyata.
+
 ---
 
 ## ✨ Fitur Utama
@@ -52,6 +85,14 @@ Buka browser dan akses:
 - **Default Password**: `admin123`
 
 Fitur Dashboard:
+- Panel **Buat Pembayaran QRIS**: masukkan nominal rupiah bulat tanpa titik/koma,
+  lalu klik **Buat QRIS**. Template memakai konfigurasi `QRIS_STATIC` server.
+- QR pembayaran, nominal, ID transaksi, countdown 5 menit, dan status otomatis
+  ditampilkan langsung di dashboard. Tersedia **Salin tautan** dan **Buka pembayaran**.
+- Pembayaran dashboard bersifat manual, tanpa `reference_id` dan tanpa callback
+  konsumen. Matching notifikasi tetap berdasarkan nominal dan pending tertua.
+- Refresh atau pindah tab mempertahankan pembayaran yang dipilih tanpa membuat
+  QRIS baru. Countdown hanya indikator; status terminal mengikuti jawaban server.
 - Ringkasan statistik jumlah & nominal transaksi (Total, Lunas, Pending, Expired).
 - Tab Filter: `Semua Transaksi`, `Berhasil (PAID)`, `Pending`, `Expired`, dan `Log Notifikasi HP`.
 - Tombol Refresh cepat dan link langsung membuka halaman checkout kasir `/qr/:id`.

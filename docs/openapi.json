@@ -1,0 +1,1319 @@
+{
+  "openapi": "3.1.1",
+  "jsonSchemaDialect": "https://spec.openapis.org/oas/3.1/dialect/base",
+  "info": {
+    "title": "DANA API Gateway Integration Contract",
+    "version": "0.1.0",
+    "description": "Kontrak source lokal pada 6 Oktober 2026 (server.js/db.js), bukan bukti deployment atau integrasi produksi. Gateway Node/Express/SQLite mengubah template QRIS statis menjadi dinamis, mencocokkan nominal notifikasi HP, dan mengirim callback. Gateway bukan API pembayaran resmi DANA dan tidak memverifikasi settlement kepada provider. Dokumen memilih metode integrasi yang dianjurkan; app.all pada create/notifications/check juga menerima metode lain yang tidak diperluas di sini. Amount request dibatasi ke profil integer positif safe integer untuk integrasi; validasi backend saat ini masih coercive. Admin login/dashboard berada di luar kontrak SDK ini."
+  },
+  "servers": [
+    {
+      "url": "https://gateway.example.invalid",
+      "description": "Placeholder. Ganti dengan URL gateway milik Anda; host ini bukan deployment yang diverifikasi."
+    }
+  ],
+  "tags": [
+    {
+      "name": "Transactions"
+    },
+    {
+      "name": "Notifications"
+    },
+    {
+      "name": "Health"
+    },
+    {
+      "name": "Checkout"
+    },
+    {
+      "name": "Consumer callbacks"
+    }
+  ],
+  "paths": {
+    "/create-qris": {
+      "post": {
+        "tags": [
+          "Transactions"
+        ],
+        "operationId": "createQris",
+        "summary": "Buat transaksi QRIS dinamis dengan expiry lima menit",
+        "description": "Menyimpan transaksi PENDING baru setiap request. reference_id tidak unik dan pengiriman ulang create tidak idempoten; jangan retry otomatis saat timeout karena hasil pembuatan dapat sudah tersimpan. Backend memakai app.all dan menerima body/query termasuk GET, tetapi profil integrasi ini memakai POST JSON. Gunakan nominal integer positif safe integer walaupun backend masih coercive dengan parseInt. Template memakai qris_static body, lalu query, lalu QRIS_STATIC. Callback URL/secret tidak dapat diset per request; keduanya konfigurasi global server.",
+        "security": [
+          {
+            "GatewayApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateQrisRequest"
+              },
+              "example": {
+                "amount": 25000,
+                "reference_id": "ORDER-FIXTURE-001"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateQrisRequest"
+              },
+              "example": {
+                "amount": 25000,
+                "reference_id": "ORDER-FIXTURE-001"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transaksi baru dengan data QRIS.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateQrisResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "description": "Template tidak tersedia/gagal menghasilkan QRIS (JSON), atau exception backend tidak tertangani (HTML).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/UnexpectedError"
+          }
+        }
+      }
+    },
+    "/api/notifications": {
+      "post": {
+        "tags": [
+          "Notifications"
+        ],
+        "operationId": "submitNotification",
+        "summary": "Terima notifikasi pembayaran Android",
+        "description": "Input dari Android/MacroDroid/Tasker; alias /webhook/dana adalah inbound gateway, berbeda dari callback outbound ke konsumen. Matching berdasarkan nominal yang sama ke PENDING tertua (ORDER BY created_at ASC) yang belum expired. Tidak ada deduplikasi notification ID maupun verifikasi pembayar/provider. Mengirim ulang notifikasi dapat melunasi transaksi pending lain dengan nominal sama. Handler menunggu hasil dispatch callback, hingga sekitar 15,2 detik untuk tiga timeout, sebelum merespons matched=true. Callback gagal tetap menghasilkan PAID dan HTTP 200. HTTP 200 matched=false berarti dicatat tanpa mencocokkan transaksi. Semua metode diterima oleh app.all; dokumen ini memilih POST sebagai profil integrasi. Payload query juga dikenali oleh backend; gunakan body agar teks/kredensial tidak tersebar dalam URL/log. Jika amount tidak ditemukan, backend dapat menyertakan body/query pada respons error; jangan menaruh secret tambahan di payload.",
+        "security": [
+          {
+            "GatewayApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationRequest"
+              },
+              "examples": {
+                "structured": {
+                  "summary": "Fixture nominal langsung",
+                  "value": {
+                    "amount": 25000,
+                    "text": "Fixture: menerima Rp 25.000"
+                  }
+                },
+                "text": {
+                  "summary": "Fixture parsing teks",
+                  "value": {
+                    "text": "Fixture: menerima Rp 25.000"
+                  }
+                }
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationRequest"
+              },
+              "example": {
+                "text": "Fixture: menerima Rp 25.000"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Notifikasi dicatat; periksa matched dan, bila cocok, data.callback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/UnexpectedError"
+          }
+        }
+      }
+    },
+    "/webhook/dana": {
+      "post": {
+        "tags": [
+          "Notifications"
+        ],
+        "operationId": "submitDanaWebhook",
+        "summary": "Terima notifikasi pembayaran Android",
+        "description": "Input dari Android/MacroDroid/Tasker; alias /webhook/dana adalah inbound gateway, berbeda dari callback outbound ke konsumen. Matching berdasarkan nominal yang sama ke PENDING tertua (ORDER BY created_at ASC) yang belum expired. Tidak ada deduplikasi notification ID maupun verifikasi pembayar/provider. Mengirim ulang notifikasi dapat melunasi transaksi pending lain dengan nominal sama. Handler menunggu hasil dispatch callback, hingga sekitar 15,2 detik untuk tiga timeout, sebelum merespons matched=true. Callback gagal tetap menghasilkan PAID dan HTTP 200. HTTP 200 matched=false berarti dicatat tanpa mencocokkan transaksi. Semua metode diterima oleh app.all; dokumen ini memilih POST sebagai profil integrasi. Payload query juga dikenali oleh backend; gunakan body agar teks/kredensial tidak tersebar dalam URL/log. Jika amount tidak ditemukan, backend dapat menyertakan body/query pada respons error; jangan menaruh secret tambahan di payload.",
+        "security": [
+          {
+            "GatewayApiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationRequest"
+              },
+              "examples": {
+                "structured": {
+                  "summary": "Fixture nominal langsung",
+                  "value": {
+                    "amount": 25000,
+                    "text": "Fixture: menerima Rp 25.000"
+                  }
+                },
+                "text": {
+                  "summary": "Fixture parsing teks",
+                  "value": {
+                    "text": "Fixture: menerima Rp 25.000"
+                  }
+                }
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationRequest"
+              },
+              "example": {
+                "text": "Fixture: menerima Rp 25.000"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Notifikasi dicatat; periksa matched dan, bila cocok, data.callback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "default": {
+            "$ref": "#/components/responses/UnexpectedError"
+          }
+        }
+      }
+    },
+    "/check-payment": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "operationId": "checkPayment",
+        "summary": "Cek pembayaran dengan API key",
+        "description": "Lookup memperbarui semua transaksi PENDING yang melewati expires_at menjadi EXPIRED. Route ini juga dapat memulai dispatcher callback expiry secara asinkron untuk transaksi terkait; dispatcher dapat memproses transaksi expired lain. GET ini mempunyai efek samping. Kirim qris_id atau trx_id; salah satu diperlukan untuk lookup walaupun backend mengembalikan 404, bukan 400, jika keduanya kosong. qris_id diprioritaskan bila keduanya diberikan. Nilai setiap parameter juga dicoba sebagai jenis ID lainnya. app.all menerima metode/body lain, tetapi profil integrasi ini menggunakan GET dengan parameter ID dalam query dan API key pada header.",
+        "security": [
+          {
+            "GatewayApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "qris_id",
+            "in": "query",
+            "description": "ID QRIS, atau nilai trx_id sebagai fallback. Prioritas lebih tinggi dari trx_id.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fixture1"
+          },
+          {
+            "name": "trx_id",
+            "in": "query",
+            "description": "ID transaksi, atau nilai qris_id sebagai fallback. Dipakai bila qris_id kosong.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "TRX-FIXTURE1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status terbungkus pada data; tidak mengandung expires_at/reference_id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckPaymentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "default": {
+            "$ref": "#/components/responses/UnexpectedError"
+          }
+        }
+      }
+    },
+    "/api/qr-status/{id}": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "operationId": "getPublicStatus",
+        "summary": "Status publik untuk polling kasir",
+        "description": "Lookup memperbarui semua transaksi PENDING yang melewati expires_at menjadi EXPIRED. Route ini juga dapat memulai dispatcher callback expiry secara asinkron untuk transaksi terkait; dispatcher dapat memproses transaksi expired lain. GET ini mempunyai efek samping. Respons sukses adalah flat tanpa data, dan tidak mengandung reference_id. Endpoint publik; kepemilikan ID cukup untuk membaca status/nominal.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "qris_id atau trx_id. Lookup mencoba kedua jenis ID.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fixture1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status pada tingkat atas.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicStatusResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "ID tidak ada; status=NOT_FOUND pada tingkat atas.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicStatusNotFound"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/UnexpectedError"
+          }
+        }
+      }
+    },
+    "/api/qr/{id}": {
+      "get": {
+        "tags": [
+          "Transactions"
+        ],
+        "operationId": "getQris",
+        "summary": "Detail QRIS publik",
+        "description": "Lookup memperbarui seluruh transaksi lewat expiry menjadi EXPIRED, tetapi route ini tidak langsung memanggil dispatcher callback. Hasil mencakup qris_code dan expires_at dalam data; reference_id tidak disertakan. ID yang ada tetap menghasilkan 200 walau EXPIRED. Endpoint publik, sehingga nominal/detail dapat dibaca dengan ID.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "qris_id atau trx_id. Lookup mencoba kedua jenis ID.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fixture1"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detail QRIS pada data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrisDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "default": {
+            "$ref": "#/components/responses/UnexpectedError"
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "operationId": "getHealth",
+        "summary": "Health proses gateway",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Proses HTTP merespons; tanpa wrapper success/data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "operationId": "getApiHealth",
+        "summary": "Health proses gateway",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Proses HTTP merespons; tanpa wrapper success/data.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/qr/{id}": {
+      "get": {
+        "tags": [
+          "Checkout"
+        ],
+        "operationId": "getCheckout",
+        "summary": "Halaman kasir atau redirect gambar QR",
+        "description": "Lookup memperbarui semua transaksi PENDING yang melewati expires_at menjadi EXPIRED. Route ini juga dapat memulai dispatcher callback expiry secara asinkron untuk transaksi terkait; dispatcher dapat memproses transaksi expired lain. GET ini mempunyai efek samping. Secara default menghasilkan HTML kasir dengan polling status setiap 3 detik. mode format=raw atau raw=1 merespons 302 ke QRServer (api.qrserver.com), bukan PNG atau QR payload mentah dari gateway. Redirect meneruskan qris_code ke layanan tersebut. Raw bagi EXPIRED menghasilkan 410; HTML bagi EXPIRED tetap 200.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "qris_id atau trx_id. Lookup mencoba kedua jenis ID.",
+            "schema": {
+              "type": "string"
+            },
+            "example": "fixture1"
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "raw"
+              ]
+            },
+            "description": "Pilih redirect gambar QR. Hilangkan untuk HTML kasir."
+          },
+          {
+            "name": "raw",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "description": "Alias format=raw."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML kasir untuk transaksi PENDING/PAID/EXPIRED.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "302": {
+            "description": "Mode raw: redirect ke endpoint gambar QRServer.",
+            "headers": {
+              "Location": {
+                "description": "URL QRServer dengan qris_code dalam query data.",
+                "schema": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "ID tidak ditemukan.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Mode raw bagi EXPIRED: teks QRIS Kedaluwarsa.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/UnexpectedError"
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "paymentCallback": {
+      "post": {
+        "tags": [
+          "Consumer callbacks"
+        ],
+        "operationId": "receivePaymentCallback",
+        "summary": "Callback outbound dari gateway ke aplikasi konsumen",
+        "description": "Gateway POST ke PAYMENT_WEBHOOK_URL dengan x-webhook-secret dari PAYMENT_WEBHOOK_SECRET. Hanya transaksi dengan reference_id yang dapat memicu callback; URL dan secret juga harus dikonfigurasi. HTTP 2xx dianggap delivered, sedangkan 400/404/422 langsung rejected. Respons lainnya, error jaringan, atau timeout dicoba maksimal 3 attempt per dispatch, dengan timeout 5 detik per attempt dan jeda 100 ms. Status PAID lokal tetap PAID saat callback gagal. Paid tidak memiliki antrean retry durable setelah dispatch selesai. Expiry diproses saat startup CLI, setiap 60 detik, dan melalui beberapa GET. expiry_webhook_sent=1 juga ditulis untuk rejected/failed/skipped, sehingga flag ini bukan bukti penerimaan HTTP 2xx. Callback tidak menyediakan event ID unik, timestamp tanda tangan, maupun HMAC; secret header adalah shared secret. Konsumen harus memverifikasi secret, mencocokkan reference_id dan amount ke pesanan sendiri, serta memproses perubahan status secara idempoten berdasarkan transaksi dan event. Body respons konsumen diabaikan gateway. Timeout dapat terjadi setelah konsumen sudah memproses payload.",
+        "security": [
+          {
+            "CallbackSecret": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaymentCallback"
+              },
+              "examples": {
+                "paid": {
+                  "summary": "Fixture payment.paid",
+                  "value": {
+                    "event": "payment.paid",
+                    "reference_id": "ORDER-FIXTURE-001",
+                    "qris_id": "fixture1",
+                    "trx_id": "TRX-FIXTURE1",
+                    "amount": 25000,
+                    "status": "paid",
+                    "paid_at": "2026-10-06T03:01:00.000Z",
+                    "payment_details": {
+                      "amount": 25000,
+                      "text": "Fixture: menerima Rp 25.000"
+                    }
+                  }
+                },
+                "expired": {
+                  "summary": "Fixture payment.expired",
+                  "value": {
+                    "event": "payment.expired",
+                    "reference_id": "ORDER-FIXTURE-001",
+                    "qris_id": "fixture1",
+                    "trx_id": "TRX-FIXTURE1",
+                    "amount": 25000,
+                    "status": "expired",
+                    "expired_at": "2026-10-06T03:05:00.000Z"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "2XX": {
+            "description": "Acknowledgment konsumen; gateway menganggap delivery berhasil dan mengabaikan body."
+          },
+          "400": {
+            "description": "Rejection permanen; tidak diulang dalam dispatch ini."
+          },
+          "404": {
+            "description": "Rejection permanen; tidak diulang dalam dispatch ini."
+          },
+          "422": {
+            "description": "Rejection permanen; tidak diulang dalam dispatch ini."
+          },
+          "default": {
+            "description": "Status lainnya memicu retry hingga tiga attempt per dispatch. Error jaringan/timeout mengikuti kebijakan yang sama."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "GatewayApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "API key inbound dari environment API_KEY. Backend juga menerima api_key/apikey dalam query, tetapi integrasi baru harus memakai header; query URL muncul dalam log auth gagal. Tidak sama dengan secret callback."
+      },
+      "CallbackSecret": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-webhook-secret",
+        "description": "Secret outbound dari PAYMENT_WEBHOOK_SECRET, dibandingkan oleh aplikasi penerima. Ini shared secret header, tanpa HMAC/signature. Jangan memakai API_KEY inbound sebagai asumsi secret ini."
+      }
+    },
+    "schemas": {
+      "PaymentStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "PAID",
+          "EXPIRED"
+        ],
+        "description": "Status API memakai huruf besar; status callback memakai huruf kecil."
+      },
+      "RecommendedAmount": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "description": "Profil input integrasi yang dianjurkan: integer positif dalam rentang safe integer JavaScript. Ini bukan validasi ketat backend saat ini: /create-qris memakai isNaN dan parseInt(amount, 10), sehingga numeric string dan beberapa nilai pecahan/scientific dapat diterima atau dikoersi. SDK menggunakan profil integer ini untuk menghindari perubahan nominal tanpa sengaja.",
+        "examples": [
+          25000
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": false
+          },
+          "message": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string",
+            "description": "Dapat muncul pada kegagalan parsing JSON."
+          },
+          "received": {
+            "type": "object",
+            "properties": {
+              "body": {},
+              "query": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "extracted_text": {}
+            },
+            "required": [
+              "body",
+              "query",
+              "extracted_text"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "message"
+        ]
+      },
+      "PublicStatusNotFound": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": false
+          },
+          "status": {
+            "type": "string",
+            "const": "NOT_FOUND"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "success",
+          "status",
+          "message"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "OK"
+          },
+          "service": {
+            "type": "string",
+            "const": "QRIS Dynamic Gateway"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "status",
+          "service",
+          "timestamp"
+        ],
+        "description": "Tidak memakai success atau data. Endpoint ini tidak menguji provider pembayaran, Android, QR scanner, atau penerimaan callback."
+      },
+      "CreateQrisRequest": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "$ref": "#/components/schemas/RecommendedAmount"
+          },
+          "reference_id": {
+            "type": "string",
+            "description": "Korelasi pesanan konsumen. String di-trim; kosong menjadi null. Opsional, tidak unik, dan bukan idempotency key. Tanpa reference_id tidak ada callback."
+          },
+          "qris_static": {
+            "type": "string",
+            "description": "Template QRIS statis. Bila tidak dikirim, gateway memakai QRIS_STATIC. Generator tidak menegakkan validitas EMVCo/QRIS lengkap; gunakan template merchant yang sudah diverifikasi."
+          }
+        },
+        "required": [
+          "amount"
+        ]
+      },
+      "CreatedQris": {
+        "type": "object",
+        "properties": {
+          "qris_id": {
+            "type": "string"
+          },
+          "trx_id": {
+            "type": "string"
+          },
+          "reference_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qris_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL halaman kasir, dibentuk dari protocol/host request dan konfigurasi proxy gateway."
+          },
+          "qris_code": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+          },
+          "status": {
+            "type": "string",
+            "const": "PENDING"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_in": {
+            "type": "string",
+            "const": "5 menit"
+          }
+        },
+        "required": [
+          "qris_id",
+          "trx_id",
+          "reference_id",
+          "qris_url",
+          "qris_code",
+          "amount",
+          "status",
+          "expires_at",
+          "expires_in"
+        ]
+      },
+      "CreateQrisResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "data": {
+            "$ref": "#/components/schemas/CreatedQris"
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "PublicStatusResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "qris_id": {
+            "type": "string"
+          },
+          "trx_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "paid": {
+            "type": "boolean"
+          },
+          "paid_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "success",
+          "qris_id",
+          "trx_id",
+          "amount",
+          "status",
+          "paid",
+          "paid_at",
+          "expires_at"
+        ],
+        "description": "Semua field berada pada tingkat atas; tidak ada wrapper data atau reference_id."
+      },
+      "CheckPaymentData": {
+        "type": "object",
+        "properties": {
+          "qris_id": {
+            "type": "string"
+          },
+          "trx_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "paid": {
+            "type": "boolean"
+          },
+          "paid_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "qris_id",
+          "trx_id",
+          "amount",
+          "status",
+          "paid",
+          "paid_at"
+        ],
+        "description": "Tidak memuat expires_at, reference_id, atau qris_code."
+      },
+      "CheckPaymentResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "data": {
+            "$ref": "#/components/schemas/CheckPaymentData"
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "QrisDetailData": {
+        "type": "object",
+        "properties": {
+          "qris_id": {
+            "type": "string"
+          },
+          "trx_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "paid": {
+            "type": "boolean"
+          },
+          "paid_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "qris_code": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "qris_id",
+          "trx_id",
+          "amount",
+          "status",
+          "paid",
+          "paid_at",
+          "qris_code",
+          "expires_at"
+        ],
+        "description": "Tidak memuat reference_id. Transaksi EXPIRED tetap dapat dikembalikan bila ID ada."
+      },
+      "QrisDetailResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "data": {
+            "$ref": "#/components/schemas/QrisDetailData"
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "NotificationRequest": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "$ref": "#/components/schemas/RecommendedAmount"
+          },
+          "text": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "notification": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "not_title": {
+            "type": "string"
+          },
+          "not_body": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "description": "Kirim amount integer positif atau teks notifikasi yang mengandung nominal. Body JSON dan application/x-www-form-urlencoded didukung. Raw text/plain tidak memiliki parser Express. Parser backend menghapus karakter non-digit dari amount, sehingga pecahan/tanda negatif dapat berubah nominal; profil integrasi ini membatasi amount ke integer positif. Tanpa nominal yang dikenali, respons 400 dan notifikasi nominal 0 tetap dicatat."
+      },
+      "CallbackDispatchResult": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "skipped",
+              "not_configured",
+              "delivered",
+              "rejected",
+              "failed"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "httpStatus": {
+            "type": "integer",
+            "enum": [
+              400,
+              404,
+              422
+            ],
+            "description": "Hanya disertakan untuk rejected."
+          }
+        },
+        "required": [
+          "status",
+          "attempts"
+        ]
+      },
+      "MatchedNotificationData": {
+        "type": "object",
+        "properties": {
+          "qris_id": {
+            "type": "string"
+          },
+          "trx_id": {
+            "type": "string"
+          },
+          "reference_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+          },
+          "status": {
+            "type": "string",
+            "const": "PAID"
+          },
+          "paid_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "callback": {
+            "$ref": "#/components/schemas/CallbackDispatchResult"
+          }
+        },
+        "required": [
+          "qris_id",
+          "trx_id",
+          "reference_id",
+          "amount",
+          "status",
+          "paid_at",
+          "callback"
+        ]
+      },
+      "MatchedNotificationResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "matched": {
+            "type": "boolean",
+            "const": true
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/MatchedNotificationData"
+          }
+        },
+        "required": [
+          "success",
+          "matched",
+          "message",
+          "data"
+        ]
+      },
+      "UnmatchedNotificationResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean",
+            "const": true
+          },
+          "matched": {
+            "type": "boolean",
+            "const": false
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer",
+                "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+              },
+              "received_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "amount",
+              "received_at"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "matched",
+          "message",
+          "data"
+        ]
+      },
+      "NotificationResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/MatchedNotificationResponse"
+          },
+          {
+            "$ref": "#/components/schemas/UnmatchedNotificationResponse"
+          }
+        ]
+      },
+      "PaymentPaidCallback": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "payment.paid"
+          },
+          "reference_id": {
+            "type": "string"
+          },
+          "qris_id": {
+            "type": "string"
+          },
+          "trx_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+          },
+          "status": {
+            "type": "string",
+            "const": "paid"
+          },
+          "paid_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "payment_details": {
+            "description": "Body notifikasi yang disimpan dan di-parse bila JSON valid. Ini data sumber notifikasi, bukan identitas pembayar yang diverifikasi; dapat berupa nilai JSON atau string/null."
+          }
+        },
+        "required": [
+          "event",
+          "reference_id",
+          "qris_id",
+          "trx_id",
+          "amount",
+          "status",
+          "paid_at",
+          "payment_details"
+        ]
+      },
+      "PaymentExpiredCallback": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string",
+            "const": "payment.expired"
+          },
+          "reference_id": {
+            "type": "string"
+          },
+          "qris_id": {
+            "type": "string"
+          },
+          "trx_id": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Nominal rupiah hasil penyimpanan gateway. Batas safe integer JavaScript belum ditegakkan backend."
+          },
+          "status": {
+            "type": "string",
+            "const": "expired"
+          },
+          "expired_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "event",
+          "reference_id",
+          "qris_id",
+          "trx_id",
+          "amount",
+          "status",
+          "expired_at"
+        ]
+      },
+      "PaymentCallback": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PaymentPaidCallback"
+          },
+          {
+            "$ref": "#/components/schemas/PaymentExpiredCallback"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "event",
+          "mapping": {
+            "payment.paid": "#/components/schemas/PaymentPaidCallback",
+            "payment.expired": "#/components/schemas/PaymentExpiredCallback"
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Input nominal tidak valid/tidak ditemukan atau body JSON rusak. Parsing JSON dapat gagal sebelum auth. Pada notifikasi, nominal tidak ditemukan juga dicatat dengan amount=0 dan dapat menyertakan received.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "API key hilang atau tidak sesuai; success=false dan message.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "ID tidak ditemukan; /check-payment juga memakai 404 bila ID tidak dikirim.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "UnexpectedError": {
+        "description": "Kegagalan Express/body-parser/backend lain dapat menghasilkan HTML/plain text, bukan wrapper JSON. Integrasi harus memeriksa status HTTP dan Content-Type.",
+        "content": {
+          "text/html": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "externalDocs": {
+    "description": "OpenAPI 3.1.1 specification",
+    "url": "https://spec.openapis.org/oas/v3.1.1.html"
+  },
+  "x-source-files": [
+    "server.js",
+    "db.js",
+    "AGENTS.md"
+  ],
+  "x-source-snapshot-date": "2026-10-06"
+}
